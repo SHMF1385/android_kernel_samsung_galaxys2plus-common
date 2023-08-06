@@ -6,6 +6,8 @@
 #define PAGE_FLAGS_H
 
 #include <linux/types.h>
+#include <linux/bug.h>
+#include <linux/mmdebug.h>
 #ifndef __GENERATING_BOUNDS_H
 #include <linux/mm_types.h>
 #include <generated/bounds.h>
@@ -107,9 +109,6 @@ enum pageflags {
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
 	PG_compound_lock,
 #endif
-#ifdef CONFIG_CMA
-	PG_cma,			/* Sticky flag to track CMA pages */
-#endif
 	__NR_PAGEFLAGS,
 
 	/* Filesystems */
@@ -127,9 +126,6 @@ enum pageflags {
 
 	/* SLOB */
 	PG_slob_free = PG_private,
-
-	/* SLUB */
-	PG_slub_frozen = PG_active,
 };
 
 #ifndef __GENERATING_BOUNDS_H
@@ -138,7 +134,7 @@ enum pageflags {
  * Macros to create function definitions for page flags
  */
 #define TESTPAGEFLAG(uname, lname)					\
-static inline int Page##uname(struct page *page) 			\
+static inline int Page##uname(const struct page *page)			\
 			{ return test_bit(PG_##lname, &page->flags); }
 
 #define SETPAGEFLAG(uname, lname)					\
@@ -176,7 +172,7 @@ static inline int __TestClearPage##uname(struct page *page)		\
 	__SETPAGEFLAG(uname, lname)  __CLEARPAGEFLAG(uname, lname)
 
 #define PAGEFLAG_FALSE(uname) 						\
-static inline int Page##uname(struct page *page) 			\
+static inline int Page##uname(const struct page *page)			\
 			{ return 0; }
 
 #define TESTSCFLAG(uname, lname)					\
@@ -214,8 +210,6 @@ PAGEFLAG(Reserved, reserved) __CLEARPAGEFLAG(Reserved, reserved)
 PAGEFLAG(SwapBacked, swapbacked) __CLEARPAGEFLAG(SwapBacked, swapbacked)
 
 __PAGEFLAG(SlobFree, slob_free)
-
-__PAGEFLAG(SlubFrozen, slub_frozen)
 
 /*
  * Private page markings that may be used by the filesystem that owns the page
@@ -281,14 +275,6 @@ PAGEFLAG_FALSE(HWPoison)
 #define __PG_HWPOISON 0
 #endif
 
-#ifdef CONFIG_CMA
-PAGEFLAG(Cma, cma)
-#else
-PAGEFLAG_FALSE(Cma)
-SETPAGEFLAG_NOOP(Cma)
-CLEARPAGEFLAG_NOOP(Cma)
-#endif
-
 u64 stable_page_flags(struct page *page);
 
 static inline int PageUptodate(struct page *page)
@@ -317,21 +303,13 @@ static inline void __SetPageUptodate(struct page *page)
 
 static inline void SetPageUptodate(struct page *page)
 {
-#ifdef CONFIG_S390
-	if (!test_and_set_bit(PG_uptodate, &page->flags))
-		page_set_storage_key(page_to_phys(page), PAGE_DEFAULT_KEY, 0);
-#else
 	/*
 	 * Memory barrier must be issued before setting the PG_uptodate bit,
 	 * so that all previous stores issued in order to bring the page
 	 * uptodate are actually visible before PageUptodate becomes true.
-	 *
-	 * s390 doesn't need an explicit smp_wmb here because the test and
-	 * set bit already provides full barriers.
 	 */
 	smp_wmb();
 	set_bit(PG_uptodate, &(page)->flags);
-#endif
 }
 
 CLEARPAGEFLAG(Uptodate, uptodate)
@@ -436,9 +414,24 @@ static inline int PageTransHuge(struct page *page)
 	return PageHead(page);
 }
 
+/*
+ * PageTransCompound returns true for both transparent huge pages
+ * and hugetlbfs pages, so it should only be called when it's known
+ * that hugetlbfs pages aren't involved.
+ */
 static inline int PageTransCompound(struct page *page)
 {
 	return PageCompound(page);
+}
+
+/*
+ * PageTransTail returns true for both transparent huge pages
+ * and hugetlbfs pages, so it should only be called when it's known
+ * that hugetlbfs pages aren't involved.
+ */
+static inline int PageTransTail(struct page *page)
+{
+	return PageTail(page);
 }
 
 #else
@@ -452,7 +445,40 @@ static inline int PageTransCompound(struct page *page)
 {
 	return 0;
 }
+
+static inline int PageTransTail(struct page *page)
+{
+	return 0;
+}
 #endif
+
+/*
+ * If network-based swap is enabled, sl*b must keep track of whether pages
+ * were allocated from pfmemalloc reserves.
+ */
+static inline int PageSlabPfmemalloc(struct page *page)
+{
+	VM_BUG_ON(!PageSlab(page));
+	return PageActive(page);
+}
+
+static inline void SetPageSlabPfmemalloc(struct page *page)
+{
+	VM_BUG_ON(!PageSlab(page));
+	SetPageActive(page);
+}
+
+static inline void __ClearPageSlabPfmemalloc(struct page *page)
+{
+	VM_BUG_ON(!PageSlab(page));
+	__ClearPageActive(page);
+}
+
+static inline void ClearPageSlabPfmemalloc(struct page *page)
+{
+	VM_BUG_ON(!PageSlab(page));
+	ClearPageActive(page);
+}
 
 #ifdef CONFIG_MMU
 #define __PG_MLOCKED		(1 << PG_mlocked)
@@ -483,12 +509,7 @@ static inline int PageTransCompound(struct page *page)
  * Pages being prepped should not have any flags set.  It they are set,
  * there has been a kernel bug or struct page corruption.
  */
-#ifdef CONFIG_CMA
-#define PAGE_FLAGS_CHECK_AT_PREP	(((1 << NR_PAGEFLAGS) - 1) & \
-						~(1 << PG_cma))
-#else
 #define PAGE_FLAGS_CHECK_AT_PREP	((1 << NR_PAGEFLAGS) - 1)
-#endif
 
 #define PAGE_FLAGS_PRIVATE				\
 	(1 << PG_private | 1 << PG_private_2)

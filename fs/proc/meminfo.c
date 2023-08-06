@@ -10,7 +10,8 @@
 #include <linux/seq_file.h>
 #include <linux/swap.h>
 #include <linux/vmstat.h>
-#include <asm/atomic.h>
+#include <linux/atomic.h>
+#include <linux/vmalloc.h>
 #include <asm/page.h>
 #include <asm/pgtable.h>
 #include "internal.h"
@@ -40,7 +41,7 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 		* sysctl_overcommit_ratio / 100) + total_swap_pages;
 
 	cached = global_page_state(NR_FILE_PAGES) -
-			total_swapcache_pages - i.bufferram;
+			total_swapcache_pages() - i.bufferram;
 	if (cached < 0)
 		cached = 0;
 
@@ -104,21 +105,12 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
 		"AnonHugePages:  %8lu kB\n"
 #endif
-#ifdef CONFIG_CMA
-		"CmaFree:        %8lu kB\n"
-		"CmaA(active):   %8lu kB\n"
-		"CmaA(inactive): %8lu kB\n"
-		"CmaF(active):   %8lu kB\n"
-		"CmaF(inactive): %8lu kB\n"
-		"CmaUnevictable: %8lu kB\n"
-		"ContigAlloc:    %8lu kB\n"
-#endif
 		,
 		K(i.totalram),
 		K(i.freeram),
 		K(i.bufferram),
 		K(cached),
-		K(total_swapcache_pages),
+		K(total_swapcache_pages()),
 		K(pages[LRU_ACTIVE_ANON]   + pages[LRU_ACTIVE_FILE]),
 		K(pages[LRU_INACTIVE_ANON] + pages[LRU_INACTIVE_FILE]),
 		K(pages[LRU_ACTIVE_ANON]),
@@ -167,20 +159,11 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 		vmi.used >> 10,
 		vmi.largest_chunk >> 10
 #ifdef CONFIG_MEMORY_FAILURE
-		,atomic_long_read(&mce_bad_pages) << (PAGE_SHIFT - 10)
+		,atomic_long_read(&num_poisoned_pages) << (PAGE_SHIFT - 10)
 #endif
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
 		,K(global_page_state(NR_ANON_TRANSPARENT_HUGEPAGES) *
 		   HPAGE_PMD_NR)
-#endif
-#ifdef CONFIG_CMA
-		, K(global_page_state(NR_FREE_CMA_PAGES))
-		, K(global_page_state(NR_CMA_ACTIVE_ANON))
-		, K(global_page_state(NR_CMA_INACTIVE_ANON))
-		, K(global_page_state(NR_CMA_ACTIVE_FILE))
-		, K(global_page_state(NR_CMA_INACTIVE_FILE))
-		, K(global_page_state(NR_CMA_UNEVICTABLE))
-		, K(global_page_state(NR_CONTIG_PAGES))
 #endif
 		);
 

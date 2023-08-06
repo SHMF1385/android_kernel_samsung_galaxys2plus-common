@@ -448,10 +448,6 @@ static irqreturn_t pca953x_irq_handler(int irq, void *devid)
 
 	do {
 		level = __ffs(pending);
-<<<<<<< HEAD
-		/* use nested irq handler since calling from irq thread */
-=======
->>>>>>> android-3.0
 		handle_nested_irq(level + chip->irq_base);
 
 		pending &= ~(1 << level);

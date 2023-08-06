@@ -146,8 +146,6 @@ int usb_control_msg(struct usb_device *dev, unsigned int pipe, __u8 request,
 	dr->wIndex = cpu_to_le16(index);
 	dr->wLength = cpu_to_le16(size);
 
-	/* dbg("usb_control_msg"); */
-
 	ret = usb_internal_control_msg(dev, pipe, dr, data, size, timeout);
 
 	kfree(dr);
@@ -435,7 +433,7 @@ int usb_sg_init(struct usb_sg_request *io, struct usb_device *dev,
 
 			len = sg->length;
 			if (length) {
-				len = min_t(unsigned, len, length);
+				len = min_t(size_t, len, length);
 				length -= len;
 				if (length == 0)
 					io->entries = i + 1;
@@ -1174,6 +1172,8 @@ void usb_disable_device(struct usb_device *dev, int skip_ep0)
 			put_device(&dev->actconfig->interface[i]->dev);
 			dev->actconfig->interface[i] = NULL;
 		}
+		usb_unlocked_disable_lpm(dev);
+		usb_disable_ltm(dev);
 		dev->actconfig = NULL;
 		if (dev->state == USB_STATE_CONFIGURED)
 			usb_set_device_state(dev, USB_STATE_ADDRESS);
@@ -1308,10 +1308,19 @@ int usb_set_interface(struct usb_device *dev, int interface, int alternate)
 	 * Remove the current alt setting and add the new alt setting.
 	 */
 	mutex_lock(hcd->bandwidth_mutex);
+	/* Disable LPM, and re-enable it once the new alt setting is installed,
+	 * so that the xHCI driver can recalculate the U1/U2 timeouts.
+	 */
+	if (usb_disable_lpm(dev)) {
+		dev_err(&iface->dev, "%s Failed to disable LPM\n.", __func__);
+		mutex_unlock(hcd->bandwidth_mutex);
+		return -ENOMEM;
+	}
 	ret = usb_hcd_alloc_bandwidth(dev, NULL, iface->cur_altsetting, alt);
 	if (ret < 0) {
 		dev_info(&dev->dev, "Not enough bandwidth for altsetting %d\n",
 				alternate);
+		usb_enable_lpm(dev);
 		mutex_unlock(hcd->bandwidth_mutex);
 		return ret;
 	}
@@ -1334,6 +1343,7 @@ int usb_set_interface(struct usb_device *dev, int interface, int alternate)
 	} else if (ret < 0) {
 		/* Re-instate the old alt setting */
 		usb_hcd_alloc_bandwidth(dev, NULL, alt, iface->cur_altsetting);
+		usb_enable_lpm(dev);
 		mutex_unlock(hcd->bandwidth_mutex);
 		return ret;
 	}
@@ -1353,6 +1363,9 @@ int usb_set_interface(struct usb_device *dev, int interface, int alternate)
 	usb_disable_interface(dev, iface, true);
 
 	iface->cur_altsetting = alt;
+
+	/* Now that the interface is installed, re-enable LPM. */
+	usb_unlocked_enable_lpm(dev);
 
 	/* If the interface only has one altsetting and the device didn't
 	 * accept the request, we attempt to carry out the equivalent action
@@ -1437,6 +1450,14 @@ int usb_reset_configuration(struct usb_device *dev)
 	config = dev->actconfig;
 	retval = 0;
 	mutex_lock(hcd->bandwidth_mutex);
+	/* Disable LPM, and re-enable it once the configuration is reset, so
+	 * that the xHCI driver can recalculate the U1/U2 timeouts.
+	 */
+	if (usb_disable_lpm(dev)) {
+		dev_err(&dev->dev, "%s Failed to disable LPM\n.", __func__);
+		mutex_unlock(hcd->bandwidth_mutex);
+		return -ENOMEM;
+	}
 	/* Make sure we have enough bandwidth for each alternate setting 0 */
 	for (i = 0; i < config->desc.bNumInterfaces; i++) {
 		struct usb_interface *intf = config->interface[i];
@@ -1465,6 +1486,7 @@ reset_old_alts:
 				usb_hcd_alloc_bandwidth(dev, NULL,
 						alt, intf->cur_altsetting);
 		}
+		usb_enable_lpm(dev);
 		mutex_unlock(hcd->bandwidth_mutex);
 		return retval;
 	}
@@ -1502,6 +1524,8 @@ reset_old_alts:
 			create_intf_ep_devs(intf);
 		}
 	}
+	/* Now that the interfaces are installed, re-enable LPM. */
+	usb_unlocked_enable_lpm(dev);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(usb_reset_configuration);
@@ -1516,7 +1540,6 @@ static void usb_release_interface(struct device *dev)
 	kfree(intf);
 }
 
-#ifdef	CONFIG_HOTPLUG
 static int usb_if_uevent(struct device *dev, struct kobj_uevent_env *env)
 {
 	struct usb_device *usb_dev;
@@ -1535,7 +1558,7 @@ static int usb_if_uevent(struct device *dev, struct kobj_uevent_env *env)
 
 	if (add_uevent_var(env,
 		   "MODALIAS=usb:"
-		   "v%04Xp%04Xd%04Xdc%02Xdsc%02Xdp%02Xic%02Xisc%02Xip%02X",
+		   "v%04Xp%04Xd%04Xdc%02Xdsc%02Xdp%02Xic%02Xisc%02Xip%02Xin%02X",
 		   le16_to_cpu(usb_dev->descriptor.idVendor),
 		   le16_to_cpu(usb_dev->descriptor.idProduct),
 		   le16_to_cpu(usb_dev->descriptor.bcdDevice),
@@ -1544,19 +1567,12 @@ static int usb_if_uevent(struct device *dev, struct kobj_uevent_env *env)
 		   usb_dev->descriptor.bDeviceProtocol,
 		   alt->desc.bInterfaceClass,
 		   alt->desc.bInterfaceSubClass,
-		   alt->desc.bInterfaceProtocol))
+		   alt->desc.bInterfaceProtocol,
+		   alt->desc.bInterfaceNumber))
 		return -ENOMEM;
 
 	return 0;
 }
-
-#else
-
-static int usb_if_uevent(struct device *dev, struct kobj_uevent_env *env)
-{
-	return -ENODEV;
-}
-#endif	/* CONFIG_HOTPLUG */
 
 struct device_type usb_if_device_type = {
 	.name =		"usb_interface",
@@ -1685,8 +1701,6 @@ int usb_set_configuration(struct usb_device *dev, int configuration)
 	struct usb_interface **new_interfaces = NULL;
 	struct usb_hcd *hcd = bus_to_hcd(dev->bus);
 	int n, nintf;
-	char *unknown_pid[2] = {"USB_HOST_UNKNOWN_PID=TRUE", NULL};
-	char **uevent_envp = NULL;
 
 	if (dev->authorized == 0 || configuration == -1)
 		configuration = 0;
@@ -1737,7 +1751,7 @@ free_interfaces:
 			}
 		}
 
-		i = dev->bus_mA - cp->desc.bMaxPower * 2;
+		i = dev->bus_mA - usb_get_max_power(dev, cp);
 		if (i < 0)
 			dev_warn(&dev->dev, "new config #%d exceeds power "
 					"limit by %dmA\n",
@@ -1765,8 +1779,20 @@ free_interfaces:
 	 * this call fails, the device state is unchanged.
 	 */
 	mutex_lock(hcd->bandwidth_mutex);
+	/* Disable LPM, and re-enable it once the new configuration is
+	 * installed, so that the xHCI driver can recalculate the U1/U2
+	 * timeouts.
+	 */
+	if (dev->actconfig && usb_disable_lpm(dev)) {
+		dev_err(&dev->dev, "%s Failed to disable LPM\n.", __func__);
+		mutex_unlock(hcd->bandwidth_mutex);
+		ret = -ENOMEM;
+		goto free_interfaces;
+	}
 	ret = usb_hcd_alloc_bandwidth(dev, cp, NULL, NULL);
 	if (ret < 0) {
+		if (dev->actconfig)
+			usb_enable_lpm(dev);
 		mutex_unlock(hcd->bandwidth_mutex);
 		usb_autosuspend_device(dev);
 		goto free_interfaces;
@@ -1849,113 +1875,11 @@ free_interfaces:
 	if (cp->string == NULL &&
 			!(dev->quirks & USB_QUIRK_CONFIG_INTF_STRINGS))
 		cp->string = usb_cache_string(dev, cp->desc.iConfiguration);
-/* Uncomment this define to enable the HS Electrical Test support */
-#define DWC_HS_ELECT_TST 1
-#ifdef DWC_HS_ELECT_TST
-		/* Here we implement the HS Electrical Test support. The
-		 * tester uses a vendor ID of 0x1A0A to indicate we should
-		 * run a special test sequence. The product ID tells us
-		 * which sequence to run. We invoke the test sequence by
-		 * sending a non-standard SetFeature command to our root
-		 * hub port. Our dwc_otg_hcd_hub_control() routine will
-		 * recognize the command and perform the desired test
-		 * sequence.
-		 */
-		if (dev->descriptor.idVendor == 0x1A0A) {
-			/* HSOTG Electrical Test */
-			dev_warn(&dev->dev, "VID from HSOTG Electrical Test Fixture\n");
 
-			if (dev->bus && dev->bus->root_hub) {
-				struct usb_device *hdev = dev->bus->root_hub;
-				dev_warn(&dev->dev, "Got PID 0x%x\n", dev->descriptor.idProduct);
-
-				switch (dev->descriptor.idProduct) {
-				case 0x0101:	/* TEST_SE0_NAK */
-					dev_warn(&dev->dev, "TEST_SE0_NAK\n");
-					usb_control_msg(hdev, usb_sndctrlpipe(hdev, 0),
-							USB_REQ_SET_FEATURE, USB_RT_PORT,
-							USB_PORT_FEAT_TEST, 0x300, NULL, 0, HZ);
-					break;
-
-				case 0x0102:	/* TEST_J */
-					dev_warn(&dev->dev, "TEST_J\n");
-					usb_control_msg(hdev, usb_sndctrlpipe(hdev, 0),
-							USB_REQ_SET_FEATURE, USB_RT_PORT,
-							USB_PORT_FEAT_TEST, 0x100, NULL, 0, HZ);
-					break;
-
-				case 0x0103:	/* TEST_K */
-					dev_warn(&dev->dev, "TEST_K\n");
-					usb_control_msg(hdev, usb_sndctrlpipe(hdev, 0),
-							USB_REQ_SET_FEATURE, USB_RT_PORT,
-							USB_PORT_FEAT_TEST, 0x200, NULL, 0, HZ);
-					break;
-
-				case 0x0104:	/* TEST_PACKET */
-					dev_warn(&dev->dev, "TEST_PACKET\n");
-					usb_control_msg(hdev, usb_sndctrlpipe(hdev, 0),
-							USB_REQ_SET_FEATURE, USB_RT_PORT,
-							USB_PORT_FEAT_TEST, 0x400, NULL, 0, HZ);
-					break;
-
-				case 0x0105:	/* TEST_FORCE_ENABLE */
-					dev_warn(&dev->dev, "TEST_FORCE_ENABLE\n");
-					usb_control_msg(hdev, usb_sndctrlpipe(hdev, 0),
-							USB_REQ_SET_FEATURE, USB_RT_PORT,
-							USB_PORT_FEAT_TEST, 0x500, NULL, 0, HZ);
-					break;
-
-				case 0x0106:	/* HS_HOST_PORT_SUSPEND_RESUME */
-					dev_warn(&dev->dev, "HS_HOST_PORT_SUSPEND_RESUME\n");
-					usb_control_msg(hdev, usb_sndctrlpipe(hdev, 0),
-							USB_REQ_SET_FEATURE, USB_RT_PORT,
-							USB_PORT_FEAT_TEST, 0x600, NULL, 0, 40 * HZ);
-					break;
-
-				case 0x0107:	/* SINGLE_STEP_GET_DEVICE_DESCRIPTOR setup */
-					dev_warn(&dev->dev, "SINGLE_STEP_GET_DEVICE_DESCRIPTOR setup\n");
-					usb_control_msg(hdev, usb_sndctrlpipe(hdev, 0),
-							USB_REQ_SET_FEATURE, USB_RT_PORT,
-							USB_PORT_FEAT_TEST, 0x700, NULL, 0, 40 * HZ);
-					break;
-
-				case 0x0108:	/* SINGLE_STEP_GET_DEVICE_DESCRIPTOR execute */
-					dev_warn(&dev->dev, "SINGLE_STEP_GET_DEVICE_DESCRIPTOR execute\n");
-					usb_control_msg(hdev, usb_sndctrlpipe(hdev, 0),
-							USB_REQ_SET_FEATURE, USB_RT_PORT,
-							USB_PORT_FEAT_TEST, 0x800, NULL, 0, 40 * HZ);
-					break;
-
-#ifdef CONFIG_USB_OTG
-				case 0x0200: /* TEST DEVICE REQUIRED BY COMPLIANCE TEST */
-					dev_warn(&dev->dev, "TEST DEVICE REQUIRED BY COMPLIANCE TEST\n");
-					hcd->self.otg_vbus_off = dev->descriptor.bcdDevice & 0x01;
-					if (hcd->self.otg_vbus_off)
-						usb_control_msg(hdev, usb_sndctrlpipe(hdev, 0),
-							USB_REQ_SET_FEATURE, USB_RT_PORT, USB_PORT_FEAT_TEST, 0x1000,
-							NULL, 0, 1000);
-					else if (hcd->self.is_b_host) {
-						/* Suspend within TTST_SUSP after HNP */
-						usb_host_suspend_test_device(dev);
-					} else
-						schedule_delayed_work(&dev->bus->maint_conf_session_for_td,
-							msecs_to_jiffies(HOST_VBOFF));
-					break;
-#endif
-				default:
-
-					uevent_envp = unknown_pid;
-					if (kobject_uevent_env(&dev->dev.kobj,
-						    KOBJ_CHANGE, uevent_envp)) {
-						dev_warn(&dev->dev, "Failed to send uevent for UNKNOWN PID from test fixture\n");
-					}
-
-					dev_warn(&dev->dev, "UNKNOWN PID from test fixture\n");
-					break;
-				}
-			}
-		}
-#endif /* DWC_HS_ELECT_TST */
+	/* Now that the interfaces are installed, re-enable LPM. */
+	usb_unlocked_enable_lpm(dev);
+	/* Enable LTM if it was turned off by usb_disable_device. */
+	usb_enable_ltm(dev);
 
 	/* Now that all the interfaces are set up, register them
 	 * to trigger binding of drivers to interfaces.  probe()

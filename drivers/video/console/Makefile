@@ -18,6 +18,8 @@ font-objs-$(CONFIG_FONT_MINI_4x6)  += font_mini_4x6.o
 
 font-objs += $(font-objs-y)
 
+obj-$(CONFIG_FONTS) += font.o
+
 # Each configuration option enables a list of files.
 
 obj-$(CONFIG_DUMMY_CONSOLE)       += dummycon.o
@@ -26,7 +28,6 @@ obj-$(CONFIG_STI_CONSOLE)         += sticon.o sticore.o font.o
 obj-$(CONFIG_VGA_CONSOLE)         += vgacon.o
 obj-$(CONFIG_MDA_CONSOLE)         += mdacon.o
 obj-$(CONFIG_FRAMEBUFFER_CONSOLE) += fbcon.o bitblit.o font.o softcursor.o
-obj-$(CONFIG_FRAMEBUFFER_FPS)	+= fb_fps.o
 ifeq ($(CONFIG_FB_TILEBLITTING),y)
 obj-$(CONFIG_FRAMEBUFFER_CONSOLE)     += tileblit.o
 endif

@@ -20,11 +20,12 @@
  */
 
 #include <linux/mm.h>
+#include <linux/module.h>
 #include <linux/file.h>
 #include <linux/slab.h>
 #include <linux/time.h>
-#include <linux/pm_qos_params.h>
-#include <linux/uio.h>
+#include <linux/pm_qos.h>
+#include <linux/aio.h>
 #include <linux/dma-mapping.h>
 #include <sound/core.h>
 #include <sound/control.h>
@@ -601,6 +602,8 @@ int snd_pcm_status(struct snd_pcm_substream *substream,
 		snd_pcm_update_hw_ptr(substream);
 		if (runtime->tstamp_mode == SNDRV_PCM_TSTAMP_ENABLE) {
 			status->tstamp = runtime->status->tstamp;
+			status->audio_tstamp =
+				runtime->status->audio_tstamp;
 			goto _tstamp_end;
 		}
 	}
@@ -895,6 +898,8 @@ static struct action_ops snd_pcm_action_start = {
 /**
  * snd_pcm_start - start all linked streams
  * @substream: the PCM substream instance
+ *
+ * Return: Zero if successful, or a negative error code.
  */
 int snd_pcm_start(struct snd_pcm_substream *substream)
 {
@@ -948,6 +953,8 @@ static struct action_ops snd_pcm_action_stop = {
  * @state: PCM state after stopping the stream
  *
  * The state of each stream is then changed to the given state unconditionally.
+ *
+ * Return: Zero if succesful, or a negative error code.
  */
 int snd_pcm_stop(struct snd_pcm_substream *substream, snd_pcm_state_t state)
 {
@@ -962,6 +969,8 @@ EXPORT_SYMBOL(snd_pcm_stop);
  *
  * After stopping, the state is changed to SETUP.
  * Unlike snd_pcm_stop(), this affects only the given stream.
+ *
+ * Return: Zero if succesful, or a negative error code.
  */
 int snd_pcm_drain_done(struct snd_pcm_substream *substream)
 {
@@ -1095,6 +1104,9 @@ static struct action_ops snd_pcm_action_suspend = {
  * @substream: the PCM substream
  *
  * After this call, all streams are changed to SUSPENDED state.
+ *
+ * Return: Zero if successful (or @substream is %NULL), or a negative error
+ * code.
  */
 int snd_pcm_suspend(struct snd_pcm_substream *substream)
 {
@@ -1117,6 +1129,8 @@ EXPORT_SYMBOL(snd_pcm_suspend);
  * @pcm: the PCM instance
  *
  * After this call, all streams are changed to SUSPENDED state.
+ *
+ * Return: Zero if successful (or @pcm is %NULL), or a negative error code.
  */
 int snd_pcm_suspend_all(struct snd_pcm *pcm)
 {
@@ -1340,6 +1354,8 @@ static struct action_ops snd_pcm_action_prepare = {
  * snd_pcm_prepare - prepare the PCM substream to be triggerable
  * @substream: the PCM substream instance
  * @file: file to refer f_flags
+ *
+ * Return: Zero if successful, or a negative error code.
  */
 static int snd_pcm_prepare(struct snd_pcm_substream *substream,
 			   struct file *file)
@@ -1367,7 +1383,14 @@ static int snd_pcm_prepare(struct snd_pcm_substream *substream,
 
 static int snd_pcm_pre_drain_init(struct snd_pcm_substream *substream, int state)
 {
-	substream->runtime->trigger_master = substream;
+	struct snd_pcm_runtime *runtime = substream->runtime;
+	switch (runtime->status->state) {
+	case SNDRV_PCM_STATE_OPEN:
+	case SNDRV_PCM_STATE_DISCONNECTED:
+	case SNDRV_PCM_STATE_SUSPENDED:
+		return -EBADFD;
+	}
+	runtime->trigger_master = substream;
 	return 0;
 }
 
@@ -1385,6 +1408,9 @@ static int snd_pcm_do_drain_init(struct snd_pcm_substream *substream, int state)
 			break;
 		case SNDRV_PCM_STATE_RUNNING:
 			runtime->status->state = SNDRV_PCM_STATE_DRAINING;
+			break;
+		case SNDRV_PCM_STATE_XRUN:
+			runtime->status->state = SNDRV_PCM_STATE_SETUP;
 			break;
 		default:
 			break;
@@ -1564,25 +1590,25 @@ static int snd_pcm_drop(struct snd_pcm_substream *substream)
 
 
 /* WARNING: Don't forget to fput back the file */
-static struct file *snd_pcm_file_fd(int fd)
+static struct file *snd_pcm_file_fd(int fd, int *fput_needed)
 {
 	struct file *file;
 	struct inode *inode;
 	unsigned int minor;
 
-	file = fget(fd);
+	file = fget_light(fd, fput_needed);
 	if (!file)
 		return NULL;
-	inode = file->f_path.dentry->d_inode;
+	inode = file_inode(file);
 	if (!S_ISCHR(inode->i_mode) ||
 	    imajor(inode) != snd_major) {
-		fput(file);
+		fput_light(file, *fput_needed);
 		return NULL;
 	}
 	minor = iminor(inode);
 	if (!snd_lookup_minor_data(minor, SNDRV_DEVICE_TYPE_PCM_PLAYBACK) &&
 	    !snd_lookup_minor_data(minor, SNDRV_DEVICE_TYPE_PCM_CAPTURE)) {
-		fput(file);
+		fput_light(file, *fput_needed);
 		return NULL;
 	}
 	return file;
@@ -1597,12 +1623,19 @@ static int snd_pcm_link(struct snd_pcm_substream *substream, int fd)
 	struct file *file;
 	struct snd_pcm_file *pcm_file;
 	struct snd_pcm_substream *substream1;
+	struct snd_pcm_group *group;
+	int fput_needed;
 
-	file = snd_pcm_file_fd(fd);
+	file = snd_pcm_file_fd(fd, &fput_needed);
 	if (!file)
 		return -EBADFD;
 	pcm_file = file->private_data;
 	substream1 = pcm_file->substream;
+	group = kmalloc(sizeof(*group), GFP_KERNEL);
+	if (!group) {
+		res = -ENOMEM;
+		goto _nolock;
+	}
 	down_write(&snd_pcm_link_rwsem);
 	write_lock_irq(&snd_pcm_link_rwlock);
 	if (substream->runtime->status->state == SNDRV_PCM_STATE_OPEN ||
@@ -1615,11 +1648,8 @@ static int snd_pcm_link(struct snd_pcm_substream *substream, int fd)
 		goto _end;
 	}
 	if (!snd_pcm_stream_linked(substream)) {
-		substream->group = kmalloc(sizeof(struct snd_pcm_group), GFP_ATOMIC);
-		if (substream->group == NULL) {
-			res = -ENOMEM;
-			goto _end;
-		}
+		substream->group = group;
+		group = NULL;
 		spin_lock_init(&substream->group->lock);
 		INIT_LIST_HEAD(&substream->group->substreams);
 		list_add_tail(&substream->link_list, &substream->group->substreams);
@@ -1631,8 +1661,10 @@ static int snd_pcm_link(struct snd_pcm_substream *substream, int fd)
  _end:
 	write_unlock_irq(&snd_pcm_link_rwlock);
 	up_write(&snd_pcm_link_rwsem);
+ _nolock:
 	snd_card_unref(substream1->pcm->card);
-	fput(file);
+	fput_light(file, fput_needed);
+	kfree(group);
 	return res;
 }
 
@@ -1981,7 +2013,7 @@ int snd_pcm_hw_constraints_complete(struct snd_pcm_substream *substream)
 	if (runtime->dma_bytes) {
 		err = snd_pcm_hw_constraint_minmax(runtime, SNDRV_PCM_HW_PARAM_BUFFER_BYTES, 0, runtime->dma_bytes);
 		if (err < 0)
-			return -EINVAL;
+			return err;
 	}
 
 	if (!(hw->rates & (SNDRV_PCM_RATE_KNOT | SNDRV_PCM_RATE_CONTINUOUS))) {
@@ -2071,15 +2103,11 @@ EXPORT_SYMBOL(snd_pcm_open_substream);
 
 static int snd_pcm_open_file(struct file *file,
 			     struct snd_pcm *pcm,
-			     int stream,
-			     struct snd_pcm_file **rpcm_file)
+			     int stream)
 {
 	struct snd_pcm_file *pcm_file;
 	struct snd_pcm_substream *substream;
 	int err;
-
-	if (rpcm_file)
-		*rpcm_file = NULL;
 
 	err = snd_pcm_open_substream(pcm, stream, file, &substream);
 	if (err < 0)
@@ -2096,8 +2124,7 @@ static int snd_pcm_open_file(struct file *file,
 		substream->pcm_release = pcm_release_private;
 	}
 	file->private_data = pcm_file;
-	if (rpcm_file)
-		*rpcm_file = pcm_file;
+
 	return 0;
 }
 
@@ -2132,7 +2159,6 @@ static int snd_pcm_capture_open(struct inode *inode, struct file *file)
 static int snd_pcm_open(struct file *file, struct snd_pcm *pcm, int stream)
 {
 	int err;
-	struct snd_pcm_file *pcm_file;
 	wait_queue_t wait;
 
 	if (pcm == NULL) {
@@ -2150,7 +2176,7 @@ static int snd_pcm_open(struct file *file, struct snd_pcm *pcm, int stream)
 	add_wait_queue(&pcm->open_wait, &wait);
 	mutex_lock(&pcm->open_mutex);
 	while (1) {
-		err = snd_pcm_open_file(file, pcm, stream, &pcm_file);
+		err = snd_pcm_open_file(file, pcm, stream);
 		if (err >= 0)
 			break;
 		if (err == -EAGAIN) {
@@ -3051,7 +3077,7 @@ static int snd_pcm_mmap_status(struct snd_pcm_substream *substream, struct file 
 		return -EINVAL;
 	area->vm_ops = &snd_pcm_vm_ops_status;
 	area->vm_private_data = substream;
-	area->vm_flags |= VM_RESERVED;
+	area->vm_flags |= VM_DONTEXPAND | VM_DONTDUMP;
 	return 0;
 }
 
@@ -3088,7 +3114,7 @@ static int snd_pcm_mmap_control(struct snd_pcm_substream *substream, struct file
 		return -EINVAL;
 	area->vm_ops = &snd_pcm_vm_ops_control;
 	area->vm_private_data = substream;
-	area->vm_flags |= VM_RESERVED;
+	area->vm_flags |= VM_DONTEXPAND | VM_DONTDUMP;
 	return 0;
 }
 #else /* ! coherent mmap */
@@ -3179,10 +3205,10 @@ static const struct vm_operations_struct snd_pcm_vm_ops_data_fault = {
 /*
  * mmap the DMA buffer on RAM
  */
-static int snd_pcm_default_mmap(struct snd_pcm_substream *substream,
-				struct vm_area_struct *area)
+int snd_pcm_lib_default_mmap(struct snd_pcm_substream *substream,
+			     struct vm_area_struct *area)
 {
-	area->vm_flags |= VM_RESERVED;
+	area->vm_flags |= VM_DONTEXPAND | VM_DONTDUMP;
 #ifdef ARCH_HAS_DMA_MMAP_COHERENT
 	if (!substream->ops->page &&
 	    substream->dma_buffer.dev.type == SNDRV_DMA_TYPE_DEV)
@@ -3200,6 +3226,7 @@ static int snd_pcm_default_mmap(struct snd_pcm_substream *substream,
 	area->vm_ops = &snd_pcm_vm_ops_data_fault;
 	return 0;
 }
+EXPORT_SYMBOL_GPL(snd_pcm_lib_default_mmap);
 
 /*
  * mmap the DMA buffer on I/O memory area
@@ -3257,7 +3284,7 @@ int snd_pcm_mmap_data(struct snd_pcm_substream *substream, struct file *file,
 	if (substream->ops->mmap)
 		err = substream->ops->mmap(substream, area);
 	else
-		err = snd_pcm_default_mmap(substream, area);
+		err = snd_pcm_lib_default_mmap(substream, area);
 	if (!err)
 		atomic_inc(&substream->mmap_count);
 	return err;

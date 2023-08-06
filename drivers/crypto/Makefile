@@ -10,14 +10,14 @@ obj-$(CONFIG_CRYPTO_DEV_FSL_CAAM) += caam/
 obj-$(CONFIG_CRYPTO_DEV_IXP4XX) += ixp4xx_crypto.o
 obj-$(CONFIG_CRYPTO_DEV_PPC4XX) += amcc/
 obj-$(CONFIG_CRYPTO_DEV_OMAP_SHAM) += omap-sham.o
-
 obj-$(CONFIG_CRYPTO_DEV_OMAP_AES) += omap-aes.o
 obj-$(CONFIG_CRYPTO_DEV_PICOXCELL) += picoxcell_crypto.o
+obj-$(CONFIG_CRYPTO_DEV_SAHARA) += sahara.o
 obj-$(CONFIG_CRYPTO_DEV_S5P) += s5p-sss.o
-
-obj-$(CONFIG_CRYPTO_DEV_BRCM_SPUM_HASH) += brcm_spum.o spum_hash.o
-obj-$(CONFIG_CRYPTO_DEV_BRCM_SPUM_AES) += brcm_spum.o spum_aes.o
-
-obj-$(CONFIG_CRYPTO_DEV_OMAP_AES) += omap-aes.o
-obj-$(CONFIG_CRYPTO_DEV_PICOXCELL) += picoxcell_crypto.o
-obj-$(CONFIG_CRYPTO_DEV_S5P) += s5p-sss.o
+obj-$(CONFIG_CRYPTO_DEV_TEGRA_AES) += tegra-aes.o
+obj-$(CONFIG_CRYPTO_DEV_UX500) += ux500/
+obj-$(CONFIG_CRYPTO_DEV_BFIN_CRC) += bfin_crc.o
+obj-$(CONFIG_CRYPTO_DEV_NX) += nx/
+obj-$(CONFIG_CRYPTO_DEV_ATMEL_AES) += atmel-aes.o
+obj-$(CONFIG_CRYPTO_DEV_ATMEL_TDES) += atmel-tdes.o
+obj-$(CONFIG_CRYPTO_DEV_ATMEL_SHA) += atmel-sha.o

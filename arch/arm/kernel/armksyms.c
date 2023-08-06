@@ -7,7 +7,7 @@
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
  */
-#include <linux/module.h>
+#include <linux/export.h>
 #include <linux/sched.h>
 #include <linux/string.h>
 #include <linux/cryptohash.h>
@@ -18,7 +18,6 @@
 #include <linux/io.h>
 
 #include <asm/checksum.h>
-#include <asm/system.h>
 #include <asm/ftrace.h>
 
 /*
@@ -46,17 +45,11 @@ extern void __aeabi_lmul(void);
 extern void __aeabi_uidiv(void);
 extern void __aeabi_uidivmod(void);
 extern void __aeabi_ulcmp(void);
-extern void __aeabi_ldivmod(void);  // added for uldivmod in DWC OTG USB driver
-extern void __aeabi_uldivmod(void); // added for uldivmod in DWC OTG USB driver
 
 extern void fpundefinstr(void);
 
-
-EXPORT_SYMBOL(__backtrace);
-
 	/* platform dependent support */
-EXPORT_SYMBOL(__udelay);
-EXPORT_SYMBOL(__const_udelay);
+EXPORT_SYMBOL(arm_delay_ops);
 
 	/* networking */
 EXPORT_SYMBOL(csum_partial);
@@ -93,10 +86,6 @@ EXPORT_SYMBOL(memmove);
 EXPORT_SYMBOL(memchr);
 EXPORT_SYMBOL(__memzero);
 
-	/* user mem (segment) */
-EXPORT_SYMBOL(__strnlen_user);
-EXPORT_SYMBOL(__strncpy_from_user);
-
 #ifdef CONFIG_MMU
 EXPORT_SYMBOL(copy_page);
 
@@ -113,9 +102,6 @@ EXPORT_SYMBOL(__put_user_2);
 EXPORT_SYMBOL(__put_user_4);
 EXPORT_SYMBOL(__put_user_8);
 #endif
-
-	/* crypto hash */
-EXPORT_SYMBOL(sha_transform);
 
 	/* gcc lib functions */
 EXPORT_SYMBOL(__ashldi3);
@@ -139,8 +125,6 @@ EXPORT_SYMBOL(__aeabi_lmul);
 EXPORT_SYMBOL(__aeabi_uidiv);
 EXPORT_SYMBOL(__aeabi_uidivmod);
 EXPORT_SYMBOL(__aeabi_ulcmp);
-EXPORT_SYMBOL(__aeabi_ldivmod);  // added for uldivmod in DWC OTG USB driver
-EXPORT_SYMBOL(__aeabi_uldivmod); // added for uldivmod in DWC OTG USB driver
 #endif
 
 	/* bitops */
